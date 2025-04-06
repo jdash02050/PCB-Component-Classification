@@ -7,8 +7,8 @@ from PIL import Image
 import os
 import glob
 from  sklearn.metrics import f1_score
-import numpy
-
+import numpy as np
+import matplotlib.pyplot as plt
 
 MODEL_NAME = "component_classification"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,6 +64,10 @@ class CNN(nn.Module):
         self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
         self.pool = nn.MaxPool2d(2, 2)
         self.fc1 = nn.Linear(32 * 16 * 16, 256)
+        ########################################################
+        # Added Dropout Layer
+        self.dropout = nn.Dropout(0.5)
+        ########################################################
         self.fc2 = nn.Linear(256, num_classes)
 
     def forward(self, x):
@@ -71,18 +75,35 @@ class CNN(nn.Module):
         x = self.pool(nn.functional.relu(self.conv2(x)))
         x = x.view(-1, 32 * 16 * 16)
         x = nn.functional.relu(self.fc1(x))
+        ########################################################
+        # Added Dropout Layer
+        x = self.dropout(x)
+        ########################################################
         x = self.fc2(x)
         return x
 
 num_classes = len(dataset.labels)
 model = CNN(num_classes).to(DEVICE)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
+###########################################################
+#optimizer = optim.Adam(model.parameters(), lr=0.001)
+# Added weight_decay parameter 
+# Penalizes larger weights in the model during training
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+###########################################################
 # Training loop
-def train_model(num_epochs=10):
+def train_model(num_epochs=10, loss_plot_path="loss_curve.png"):
     best_acc = 0.0
+    train_losses = []
+    val_losses = []
+
+    #define for early stoppage 
+    epoch_check = 0
+    epoch_threshold = 25
+    temp_err = float('inf')
+
     for epoch in range(num_epochs):
+        i = epoch
         model.train()
         running_loss = 0.0
         for inputs, labels in train_loader:
@@ -95,33 +116,75 @@ def train_model(num_epochs=10):
             optimizer.step()
             running_loss += loss.item()
         
+        avg_train_loss = running_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+
         # validation
         model.eval()
+        val_loss = 0.0
         correct = 0
         total = 0
+        all_preds = []
+        all_labels = []
+
         with torch.no_grad():
             for inputs, labels in test_loader:
                 inputs = inputs.to(DEVICE)
                 labels = labels.to(DEVICE)
                 outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
         
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
+        avg_val_loss = val_loss / len(test_loader)
+        val_losses.append(avg_val_loss)
+
         acc = 100 * correct / total
         
-        f1_prediction = predicted.cpu().numpy()  # Move tensor to CPU first
-        f1_truth = labels.cpu().numpy()  # Move tensor to CPU first
-
+        f1_prediction = predicted.numpy()
+        f1_truth = labels.numpy()
         f1 = f1_score(f1_truth,f1_prediction,average='weighted')
         
         print(f'Epoch {epoch+1}, Loss: {running_loss/len(train_loader):.4f}, Acc: {acc:.2f}%, F1 Score: {f1}')
+        
         if acc > best_acc:
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'label_mapping': dataset.label_to_idx
             }, f'{MODEL_NAME}.pth')
             best_acc = acc
+        ##############################################
+        # Early Stopping
+        if epoch_check < epoch_threshold:
+            if np.round(avg_train_loss,6) < temp_err:
+                epoch_check = 0
+                temp_err = np.round(avg_train_loss, 6)
+            else:
+                epoch_check += 1
+        else:
+            print("early stopping triggered!")
+            break
+        ##############################################
+
+    # Plotting Losses
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label="Training Loss", color="blue")
+    plt.plot(val_losses, label="Validation Loss", color="red")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.title("Training vs. Validation Loss")
+    plt.legend()
+    plt.grid()
+    plt.savefig(loss_plot_path)
+    plt.show()
+
+
 
 def predict_image(image_path):
     transform = transforms.Compose([
